@@ -296,8 +296,8 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
 
-    // Listen to Items
-    const itemsCollection = collection(db, 'artifacts', appId, 'users', user.uid, 'items');
+    // Listen to Items - UPDATED to match 'moving_items' in security rules
+    const itemsCollection = collection(db, 'artifacts', appId, 'users', user.uid, 'moving_items');
     const q = query(itemsCollection);
     
     const unsubscribeItems = onSnapshot(q, (snapshot) => {
@@ -354,9 +354,11 @@ export default function App() {
 
     try {
       if (editingItem) {
-        await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'items', editingItem.id), payload);
+        // UPDATED: 'moving_items'
+        await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'moving_items', editingItem.id), payload);
       } else {
-        await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'items'), {
+        // UPDATED: 'moving_items'
+        await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'moving_items'), {
           ...payload,
           createdAt: serverTimestamp()
         });
@@ -370,7 +372,8 @@ export default function App() {
   const handleUpdateStatus = async (itemId, newStatus) => {
     if (!user || !itemId || !newStatus) return;
     try {
-        await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'items', itemId), {
+        // UPDATED: 'moving_items'
+        await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'moving_items', itemId), {
             status: newStatus,
             updatedAt: serverTimestamp()
         });
@@ -382,7 +385,8 @@ export default function App() {
   const handleDeleteItem = async (itemId) => {
     if (!user || !window.confirm("Are you sure you want to delete this item? This action cannot be undone.")) return;
     try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'items', itemId));
+      // UPDATED: 'moving_items'
+      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'moving_items', itemId));
     } catch (error) {
       console.error("Error deleting item:", error);
     }
