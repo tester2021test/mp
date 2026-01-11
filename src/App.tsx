@@ -46,8 +46,7 @@ import {
   Lock
 } from 'lucide-react';
 
-// --- Firebase Configuration ---
-// 1. PASTE YOUR FIREBASE CONFIG HERE
+// --- Firebase Configuration & Initialization ---
 const firebaseConfig = {
   apiKey: "AIzaSyA3rq4VoIBabzv7rugZUfMzTDaRLbkqU0c",
   authDomain: "move-master-app.firebaseapp.com",
@@ -58,14 +57,11 @@ const firebaseConfig = {
   measurementId: "G-01DHYGFZVY"
 };
 
-// 2. Initialize Firebase
-const app = initializeApp(
-  typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : firebaseConfig
-);
+const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'move-master-v1';
-
+// This appId refers to the internal application container ID for data separation, not the Firebase App ID.
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'home-planner-v1';
 
 // --- Constants & Options ---
 const ROOMS = ['Living Room', 'Bedroom', 'Kitchen', 'Bathroom', 'Office', 'Garage', 'Other'];
@@ -280,10 +276,10 @@ export default function App() {
   useEffect(() => {
     const initAuth = async () => {
       try {
+        // If a custom token is available from the environment, use it first
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
           await signInWithCustomToken(auth, __initial_auth_token);
         }
-        // Removed signInAnonymously fallback to require login
       } catch (error) {
         console.error("Auth failed:", error);
       }
@@ -322,8 +318,11 @@ export default function App() {
         setBudget(data.budget || 0);
         setTempBudget(data.budget || 0);
       } else {
-        setDoc(settingsDocRef, { budget: 0 });
+        // Only set if not exists, but catch error if permission denied (e.g. read-only)
+        setDoc(settingsDocRef, { budget: 0 }).catch(e => console.log("Init budget settings error (likely permissions, ignore if read-only):", e));
       }
+    }, (error) => {
+        console.error("Error fetching settings:", error);
     });
 
     return () => {
