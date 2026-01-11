@@ -2,12 +2,10 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
-  signInAnonymously, 
+  onAuthStateChanged,
   signInWithCustomToken,
   signInWithEmailAndPassword,
-  signOut,
-  onAuthStateChanged,
-  User
+  signOut
 } from 'firebase/auth';
 import { 
   getFirestore, 
@@ -15,40 +13,37 @@ import {
   addDoc, 
   updateDoc, 
   deleteDoc, 
-  setDoc,
   doc, 
+  query, 
   onSnapshot, 
-  serverTimestamp 
+  serverTimestamp,
+  setDoc
 } from 'firebase/firestore';
 import { 
+  LayoutDashboard, 
+  List, 
   Plus, 
   Trash2, 
-  Check, 
-  ShoppingCart, 
+  Edit2, 
+  CheckCircle2, 
+  ExternalLink, 
   Home, 
-  Monitor, 
-  Utensils, 
-  Bed, 
-  Bath, 
-  Box, 
-  ChevronDown, 
-  ChevronUp, 
-  ExternalLink,
+  Filter,
+  Save,
+  ShoppingBag,
+  AlertCircle,
+  X,
   IndianRupee,
   Wallet,
-  X,
-  CreditCard,
+  BarChart3,
   Download,
   Printer,
-  Pencil,
-  Link as LinkIcon,
-  LogOut,
-  Mail,
-  Lock,
-  Loader2,
-  FileText,
+  FileSpreadsheet,
   Search,
-  MoreVertical
+  Columns,
+  GripHorizontal,
+  LogOut,
+  Lock
 } from 'lucide-react';
 
 // --- Firebase Configuration ---
@@ -71,478 +66,1107 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'move-master-v1';
 
-// --- Types & Constants ---
-type Candidate = { id: string; name: string; price: number; link?: string; selected: boolean; };
-type Item = { id: string; name: string; category: string; status: 'researching' | 'decided' | 'purchased'; priority: 'must_have' | 'nice_to_have' | 'later'; candidates: Candidate[]; selectedPrice: number; purchasedPrice?: number; createdAt: any; };
 
-const CATEGORIES = [
-  { id: 'living', label: 'Living Room', icon: Monitor, color: 'bg-indigo-100 text-indigo-700' },
-  { id: 'kitchen', label: 'Kitchen', icon: Utensils, color: 'bg-orange-100 text-orange-700' },
-  { id: 'bedroom', label: 'Bedroom', icon: Bed, color: 'bg-rose-100 text-rose-700' },
-  { id: 'bathroom', label: 'Bathroom', icon: Bath, color: 'bg-cyan-100 text-cyan-700' },
-  { id: 'utility', label: 'Utility', icon: Box, color: 'bg-slate-100 text-slate-700' },
-  { id: 'other', label: 'Other', icon: Home, color: 'bg-emerald-100 text-emerald-700' },
-];
+// --- Constants & Options ---
+const ROOMS = ['Living Room', 'Bedroom', 'Kitchen', 'Bathroom', 'Office', 'Garage', 'Other'];
+const CATEGORIES = ['Furniture', 'Electronics', 'Appliances', 'Decor', 'Utilities', 'Supplies'];
+const PRIORITIES = ['High', 'Medium', 'Low'];
+const STATUSES = ['Planned', 'Shortlisted', 'Bought', 'Dropped'];
 
-const PRIORITIES = {
-  must_have: { label: 'Must Have', color: 'bg-red-50 text-red-700 border-red-200' },
-  nice_to_have: { label: 'Nice to Have', color: 'bg-blue-50 text-blue-700 border-blue-200' },
-  later: { label: 'Can Wait', color: 'bg-slate-50 text-slate-600 border-slate-200' },
+// --- Helper Functions ---
+const formatCurrency = (amount) => {
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 0,
+  }).format(amount || 0);
 };
 
-const formatINR = (amount: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(amount);
+// --- Chart Components ---
+const SimpleBarChart = ({ data }) => {
+  const maxVal = Math.max(...data.map(d => d.value), 1);
 
-// --- Main Component ---
-export default function MoveMasterApp() {
-  const [user, setUser] = useState<User | null>(null);
-  const [items, setItems] = useState<Item[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [budgetLimit, setBudgetLimit] = useState<number>(0);
-  
-  // Auth State
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [authError, setAuthError] = useState('');
-  const [authLoading, setAuthLoading] = useState(false);
+  if (data.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-48 text-slate-400 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+        <BarChart3 size={32} className="mb-2 opacity-50"/>
+        <span className="text-xs font-medium">No cost data yet</span>
+      </div>
+    );
+  }
 
-  // UI State
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const [isBudgetModalOpen, setIsBudgetModalOpen] = useState(false);
-  
-  // Form State
-  const [newItemName, setNewItemName] = useState('');
-  const [newItemCategory, setNewItemCategory] = useState('living');
-  const [newItemPriority, setNewItemPriority] = useState('must_have');
-  const [tempBudgetInput, setTempBudgetInput] = useState('');
-
-  // --- Effects ---
-  useEffect(() => {
-    const initAuth = async () => {
-      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-        try { await signInWithCustomToken(auth, __initial_auth_token); } catch (e) { console.error(e); }
-      } 
-    };
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, (u) => { setUser(u); setLoading(false); });
-    return () => unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    if (!user) { setItems([]); return; }
-    const unsubscribeItems = onSnapshot(collection(db, 'artifacts', appId, 'users', user.uid, 'moving_items'), (snapshot) => {
-      const fetchedItems = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Item[];
-      // Sort by creation time desc
-      fetchedItems.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
-      setItems(fetchedItems);
-    });
-    const unsubscribeSettings = onSnapshot(doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'general'), (doc) => {
-      if (doc.exists()) { setBudgetLimit(doc.data().budgetLimit || 0); }
-    });
-    return () => { unsubscribeItems(); unsubscribeSettings(); };
-  }, [user]);
-
-  // --- Handlers ---
-  const handleAuth = async (e: React.FormEvent) => {
-    e.preventDefault(); setAuthError(''); setAuthLoading(true);
-    try { await signInWithEmailAndPassword(auth, email, password); } 
-    catch (err: any) { setAuthError(err.message.replace('Firebase: ', '')); } 
-    finally { setAuthLoading(false); }
-  };
-
-  const handleGuestLogin = async () => {
-      setAuthLoading(true);
-      try { await signInAnonymously(auth); } 
-      catch (err: any) { setAuthError(err.message); } 
-      finally { setAuthLoading(false); }
-  };
-
-  const handleLogout = async () => { await signOut(auth); };
-
-  const handleAddItem = async (e: React.FormEvent) => {
-    e.preventDefault(); if (!newItemName.trim() || !user) return;
-    await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'moving_items'), {
-      name: newItemName, category: newItemCategory, priority: newItemPriority, status: 'researching',
-      candidates: [], selectedPrice: 0, createdAt: serverTimestamp()
-    });
-    setNewItemName(''); setIsAddModalOpen(false);
-  };
-
-  const deleteItem = async (itemId: string) => {
-    if (!user || !confirm('Delete this item?')) return;
-    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'moving_items', itemId));
-  };
-
-  const saveBudget = async (e: React.FormEvent) => {
-    e.preventDefault(); if (!user) return;
-    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'general'), { budgetLimit: Number(tempBudgetInput) }, { merge: true });
-    setIsBudgetModalOpen(false);
-  };
-
-  // --- Stats & Grouping ---
-  const stats = useMemo(() => items.reduce((acc, item) => {
-    const realCost = item.status === 'purchased' ? (item.purchasedPrice || 0) : (item.selectedPrice || 0);
-    acc.totalProjected += realCost;
-    if (item.status === 'purchased') { acc.spent += item.purchasedPrice || 0; acc.purchasedCount += 1; }
-    acc.totalItems += 1; return acc;
-  }, { totalProjected: 0, spent: 0, totalItems: 0, purchasedCount: 0 }), [items]);
-
-  const itemsByRoom = useMemo(() => {
-    const groups: Record<string, Item[]> = {};
-    CATEGORIES.forEach(cat => groups[cat.id] = []);
-    items.forEach(item => { if (groups[item.category]) groups[item.category].push(item); });
-    return groups;
-  }, [items]);
-
-  const budgetUsagePercent = budgetLimit > 0 ? (stats.totalProjected / budgetLimit) * 100 : 0;
-  const isOverBudget = stats.totalProjected > budgetLimit && budgetLimit > 0;
-
-  // --- Export ---
-  const exportCSV = () => {
-    if (items.length === 0) return;
-    let csvContent = "data:text/csv;charset=utf-8,Name,Category,Status,Price\n" + items.map(item => `"${item.name}","${item.category}","${item.status}","${item.selectedPrice}"`).join("\n");
-    const link = document.createElement("a"); link.href = encodeURI(csvContent); link.download = "move_master.csv"; link.click();
-  };
-
-  if (loading) return <div className="flex h-screen items-center justify-center bg-slate-50"><Loader2 className="w-10 h-10 text-slate-900 animate-spin"/></div>;
-
-  if (!user) return (
-    <div className="min-h-screen bg-white flex items-center justify-center p-6">
-      <div className="w-full max-w-sm">
-        <div className="mb-10">
-          <div className="w-16 h-16 bg-black text-white rounded-2xl flex items-center justify-center mb-6 shadow-xl"><Check size={32} strokeWidth={3}/></div>
-          <h1 className="text-4xl font-extrabold text-slate-900 tracking-tight">MoveMaster</h1>
-          <p className="text-slate-500 font-medium text-lg mt-2">Smart Purchase Planner</p>
+  return (
+    <div className="space-y-4">
+      {data.map((item, index) => (
+        <div key={index} className="group">
+          <div className="flex justify-between items-end mb-1">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">{item.label}</span>
+            <span className="text-sm font-bold text-slate-800">{formatCurrency(item.value)}</span>
+          </div>
+          <div className="w-full bg-slate-100 rounded-full h-3 overflow-hidden">
+            <div 
+              className="h-full rounded-full transition-all duration-1000 ease-out relative"
+              style={{ width: `${(item.value / maxVal) * 100}%`, backgroundColor: item.color }}
+            >
+                <div className="absolute top-0 left-0 right-0 bottom-0 bg-gradient-to-r from-transparent via-white/20 to-transparent w-full -translate-x-full group-hover:animate-[shimmer_1.5s_infinite]"></div>
+            </div>
+          </div>
         </div>
-        {authError && <div className="mb-6 p-4 bg-red-50 text-red-600 text-sm rounded-lg font-bold border-l-4 border-red-500">{authError}</div>}
-        <form onSubmit={handleAuth} className="space-y-4">
-          <div>
-             <label className="block text-xs font-bold text-slate-900 uppercase mb-1">Email</label>
-             <div className="relative"><Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} /><input type="email" required value={email} onChange={e => setEmail(e.target.value)} className="w-full pl-11 pr-4 py-4 rounded-xl bg-slate-50 border border-slate-200 focus:border-black focus:ring-0 font-medium outline-none transition-all" placeholder="name@example.com" /></div>
-          </div>
-          <div>
-             <label className="block text-xs font-bold text-slate-900 uppercase mb-1">Password</label>
-             <div className="relative"><Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} /><input type="password" required value={password} onChange={e => setPassword(e.target.value)} className="w-full pl-11 pr-4 py-4 rounded-xl bg-slate-50 border border-slate-200 focus:border-black focus:ring-0 font-medium outline-none transition-all" placeholder="••••••••" /></div>
-          </div>
-          <button type="submit" disabled={authLoading} className="w-full py-4 bg-black text-white rounded-xl font-bold text-lg shadow-lg active:scale-[0.98] transition-all flex justify-center gap-2">{authLoading && <Loader2 className="animate-spin" size={24} />} Enter</button>
-        </form>
-        <div className="my-8 text-center text-xs font-bold text-slate-300 uppercase tracking-widest">Or Continue As</div>
-        <button onClick={handleGuestLogin} disabled={authLoading} className="w-full py-4 bg-white border-2 border-slate-100 text-slate-900 rounded-xl font-bold text-lg active:scale-[0.98] transition-all flex items-center justify-center gap-2">Guest User</button>
-        <div className="mt-12 text-center border-t border-slate-100 pt-6"><p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Built for Vivek Narkhede</p></div>
+      ))}
+    </div>
+  );
+};
+
+// --- Helper Components ---
+
+const StatusBadge = ({ status }) => {
+  const colors = {
+    Planned: 'bg-slate-100 text-slate-700 border-slate-200',
+    Shortlisted: 'bg-purple-50 text-purple-700 border-purple-200',
+    Bought: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    Dropped: 'bg-rose-50 text-rose-700 border-rose-200 line-through opacity-70'
+  };
+  return (
+    <span className={`px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wider font-bold border ${colors[status] || 'bg-gray-100'}`}>
+      {status}
+    </span>
+  );
+};
+
+const PriorityBadge = ({ priority }) => {
+  const colors = {
+    High: 'text-rose-600 bg-rose-50 border-rose-100',
+    Medium: 'text-amber-600 bg-amber-50 border-amber-100',
+    Low: 'text-blue-600 bg-blue-50 border-blue-100'
+  };
+  return (
+    <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold border ${colors[priority]}`}>
+      {priority}
+    </span>
+  );
+};
+
+const Modal = ({ isOpen, onClose, title, children }) => {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/60 backdrop-blur-sm p-0 sm:p-4 transition-all duration-300">
+      <div className="bg-white w-full sm:max-w-lg sm:rounded-2xl rounded-t-2xl shadow-2xl max-h-[95vh] overflow-y-auto animate-in slide-in-from-bottom-10 sm:slide-in-from-bottom-0 sm:zoom-in-95 duration-300">
+        <div className="flex justify-between items-center p-5 border-b sticky top-0 bg-white/95 backdrop-blur z-10">
+          <h2 className="text-xl font-bold text-slate-800 tracking-tight">{title}</h2>
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full text-slate-500 transition-colors">
+            <X size={20} />
+          </button>
+        </div>
+        <div className="p-5 safe-pb">
+          {children}
+        </div>
       </div>
     </div>
   );
+};
+
+// --- Login Page Component ---
+const LoginPage = ({ onLogin }) => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setIsLoggingIn(true);
+    setError('');
+    try {
+      await onLogin(email, password);
+    } catch (err) {
+      console.error(err);
+      setError('Invalid email or password.');
+      setIsLoggingIn(false);
+    }
+  };
 
   return (
-    <div className="flex h-screen bg-[#FAFAFA] font-sans text-slate-900 overflow-hidden">
-      
-      {/* --- DESKTOP SIDEBAR --- */}
-      <aside className="hidden md:flex w-72 flex-col bg-white border-r border-slate-200 z-20">
-        <div className="p-8">
-           <h1 className="text-2xl font-black text-slate-900 tracking-tight">MoveMaster</h1>
-           <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Vivek Narkhede</p>
-        </div>
-        <div className="flex-1 overflow-y-auto px-6 space-y-8">
-           {/* Budget Widget */}
-           <div>
-              <div className="flex justify-between items-end mb-2">
-                 <span className="text-xs font-bold text-slate-400 uppercase">Budget</span>
-                 <button onClick={() => setIsBudgetModalOpen(true)} className="text-xs font-bold text-indigo-600 hover:underline">Edit</button>
-              </div>
-              <div className={`p-5 rounded-2xl border-2 ${isOverBudget ? 'bg-red-50 border-red-100' : 'bg-white border-slate-100'}`}>
-                 <div className="text-3xl font-black text-slate-900">{formatINR(stats.totalProjected)}</div>
-                 <div className="text-xs font-medium text-slate-500 mt-1">of {formatINR(budgetLimit)} limit</div>
-                 <div className="mt-4 w-full bg-slate-100 rounded-full h-2 overflow-hidden"><div className={`h-full rounded-full ${isOverBudget ? 'bg-red-500' : 'bg-black'}`} style={{ width: `${Math.min(budgetUsagePercent, 100)}%` }}></div></div>
-              </div>
-           </div>
-           {/* Stats */}
-           <div className="space-y-3">
-              <div className="flex justify-between items-center p-3 rounded-xl bg-slate-50">
-                 <span className="text-sm font-bold text-slate-600">Spent</span>
-                 <span className="text-sm font-bold text-emerald-600">{formatINR(stats.spent)}</span>
-              </div>
-              <div className="flex justify-between items-center p-3 rounded-xl bg-slate-50">
-                 <span className="text-sm font-bold text-slate-600">Items</span>
-                 <span className="text-sm font-bold text-slate-900">{items.length}</span>
-              </div>
-           </div>
-           {/* Actions */}
-           <div className="pt-4 border-t border-slate-100 space-y-3">
-              <button onClick={exportCSV} className="w-full flex items-center gap-3 text-sm font-bold text-slate-500 hover:text-slate-900"><Download size={18}/> Export CSV</button>
-              <button onClick={() => window.print()} className="w-full flex items-center gap-3 text-sm font-bold text-slate-500 hover:text-slate-900"><Printer size={18}/> Print Report</button>
-              <button onClick={handleLogout} className="w-full flex items-center gap-3 text-sm font-bold text-red-500 hover:text-red-700"><LogOut size={18}/> Sign Out</button>
-           </div>
-        </div>
-      </aside>
-
-      {/* --- MAIN CONTENT AREA --- */}
-      <main className="flex-1 flex flex-col h-full relative overflow-hidden">
-        
-        {/* Mobile Header (Sticky Budget) */}
-        <header className="md:hidden flex-none bg-white border-b border-slate-200 z-20">
-           <div className="px-5 py-4 flex justify-between items-center">
-              <div>
-                 <h1 className="text-lg font-black text-slate-900 leading-none">MoveMaster</h1>
-                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Vivek Narkhede</p>
-              </div>
-              <div onClick={() => setIsBudgetModalOpen(true)} className={`px-3 py-1.5 rounded-lg border-2 font-bold text-xs flex items-center gap-2 ${isOverBudget ? 'border-red-100 bg-red-50 text-red-700' : 'border-slate-100 bg-slate-50 text-slate-900'}`}>
-                 <span>{formatINR(stats.totalProjected)}</span>
-                 {isOverBudget && <span className="w-2 h-2 rounded-full bg-red-500"></span>}
-              </div>
-           </div>
-           {/* Mobile Progress Bar Line */}
-           {budgetLimit > 0 && <div className="h-1 w-full bg-slate-100"><div className={`h-full ${isOverBudget ? 'bg-red-500' : 'bg-black'}`} style={{ width: `${Math.min(budgetUsagePercent, 100)}%` }}></div></div>}
-        </header>
-
-        {/* Scrollable List Area */}
-        <div className="flex-1 overflow-y-auto overflow-x-hidden no-scrollbar pb-32 md:pb-10 p-0 md:p-8">
-           <div className="max-w-3xl mx-auto space-y-8">
-              {/* Desktop Header Title */}
-              <div className="hidden md:block mb-8">
-                 <h2 className="text-3xl font-black text-slate-900">Your List</h2>
-                 <p className="text-slate-500 font-medium">Grouped by Room</p>
-              </div>
-
-              {/* EMPTY STATE */}
-              {items.length === 0 && (
-                 <div className="flex flex-col items-center justify-center py-20 text-center px-6">
-                    <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mb-4 text-slate-300"><ShoppingCart size={32}/></div>
-                    <h3 className="text-xl font-bold text-slate-900">List is empty</h3>
-                    <p className="text-slate-500 mt-2 max-w-xs mx-auto">Tap the + button to start adding items for your new home.</p>
-                 </div>
-              )}
-
-              {/* SMART LIST: Grouped by Category */}
-              {CATEGORIES.map(cat => {
-                 const roomItems = itemsByRoom[cat.id];
-                 const roomTotal = roomItems.reduce((sum, i) => sum + (i.status === 'purchased' ? (i.purchasedPrice || 0) : (i.selectedPrice || 0)), 0);
-                 
-                 // If no items in this room, skip rendering it to keep list clean
-                 if (roomItems.length === 0) return null;
-
-                 return (
-                    <div key={cat.id} className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-                       <div className="sticky top-0 md:static z-10 bg-[#FAFAFA] px-5 py-3 md:px-0 flex justify-between items-end border-b border-slate-200 md:border-none mb-0 md:mb-3">
-                          <div className="flex items-center gap-2">
-                             <div className={`p-1.5 rounded-md ${cat.color} bg-opacity-20`}><cat.icon size={16}/></div>
-                             <h3 className="text-lg font-bold text-slate-900">{cat.label}</h3>
-                          </div>
-                          <span className="text-xs font-bold text-slate-500 bg-slate-100 px-2 py-1 rounded-md">{formatINR(roomTotal)}</span>
-                       </div>
-                       
-                       <div className="bg-white md:rounded-2xl border-b md:border border-slate-200 shadow-sm divide-y divide-slate-100">
-                          {roomItems.map(item => (
-                             <SmartListItem key={item.id} item={item} user={user} appId={appId} onDelete={() => deleteItem(item.id)} />
-                          ))}
-                       </div>
-                    </div>
-                 );
-              })}
-           </div>
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+      <div className="bg-white w-full max-w-md rounded-2xl shadow-xl border border-slate-100 p-8">
+        <div className="flex flex-col items-center mb-8">
+          <div className="bg-indigo-600 p-3 rounded-xl shadow-lg shadow-indigo-200 mb-4">
+            <Home className="text-white h-8 w-8" />
+          </div>
+          <h1 className="text-2xl font-bold text-slate-900">Welcome Back</h1>
+          <p className="text-slate-500 text-sm">Sign in to your Home Moving Planner</p>
         </div>
 
-        {/* Floating Action Button (Mobile & Desktop) */}
-        <div className="absolute bottom-6 right-6 z-30">
-           <button 
-             onClick={() => setIsAddModalOpen(true)}
-             className="w-16 h-16 bg-black text-white rounded-full shadow-2xl shadow-slate-400 flex items-center justify-center hover:scale-105 active:scale-95 transition-all"
-           >
-              <Plus size={32} strokeWidth={2.5} />
-           </button>
-        </div>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="block text-xs font-bold uppercase text-slate-500 tracking-wider mb-2">Email</label>
+            <input 
+              type="email" 
+              required
+              className="w-full p-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold uppercase text-slate-500 tracking-wider mb-2">Password</label>
+            <input 
+              type="password" 
+              required
+              className="w-full p-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+              placeholder="••••••••"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
 
-        {/* Mobile Bottom Menu (Logout/Export) */}
-        <div className="md:hidden fixed top-4 left-4 z-50">
-           {/* Hidden menu trigger area or simple icon if needed, but sticky header covers basic budget. Export/Logout is secondary on mobile. 
-               Let's put a small menu icon in top right of header if needed, but simplifying to focus on list.
-           */}
-        </div>
+          {error && (
+            <div className="flex items-center gap-2 text-rose-600 text-sm bg-rose-50 p-3 rounded-lg">
+              <AlertCircle size={16} />
+              {error}
+            </div>
+          )}
 
-      </main>
-
-      {/* --- ADD ITEM MODAL --- */}
-      {isAddModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
-           <div className="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl relative">
-              <div className="flex justify-between items-center mb-6">
-                 <h2 className="text-xl font-black text-slate-900">Add Item</h2>
-                 <button onClick={() => setIsAddModalOpen(false)} className="p-2 bg-slate-100 rounded-full text-slate-500 hover:bg-slate-200"><X size={20}/></button>
-              </div>
-              <form onSubmit={handleAddItem} className="space-y-5">
-                 <div>
-                    <label className="text-xs font-bold text-slate-500 uppercase mb-1 block">Item Name</label>
-                    <input type="text" autoFocus className="w-full px-4 py-3 bg-slate-50 rounded-xl border-2 border-slate-100 focus:border-black font-bold text-slate-900 outline-none" placeholder="e.g. Sofa" value={newItemName} onChange={e => setNewItemName(e.target.value)} />
-                 </div>
-                 <div className="grid grid-cols-2 gap-4">
-                    <div>
-                       <label className="text-xs font-bold text-slate-500 uppercase mb-1 block">Room</label>
-                       <div className="relative">
-                          <select className="w-full px-3 py-3 bg-slate-50 rounded-xl border-2 border-slate-100 focus:border-black font-bold text-slate-900 outline-none appearance-none text-sm" value={newItemCategory} onChange={e => setNewItemCategory(e.target.value)}>
-                             {CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
-                          </select>
-                          <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={14}/>
-                       </div>
-                    </div>
-                    <div>
-                       <label className="text-xs font-bold text-slate-500 uppercase mb-1 block">Priority</label>
-                       <div className="relative">
-                          <select className="w-full px-3 py-3 bg-slate-50 rounded-xl border-2 border-slate-100 focus:border-black font-bold text-slate-900 outline-none appearance-none text-sm" value={newItemPriority} onChange={e => setNewItemPriority(e.target.value as any)}>
-                             <option value="must_have">Must Have</option><option value="nice_to_have">Nice to Have</option><option value="later">Later</option>
-                          </select>
-                          <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={14}/>
-                       </div>
-                    </div>
-                 </div>
-                 <button type="submit" className="w-full py-4 bg-black text-white rounded-xl font-bold text-lg shadow-lg active:scale-[0.98] transition-all flex justify-center gap-2">Add to List</button>
-              </form>
-           </div>
-        </div>
-      )}
-
-      {/* --- BUDGET MODAL --- */}
-      {isBudgetModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in">
-           <div className="bg-white w-full max-w-xs rounded-3xl p-6 text-center shadow-2xl">
-              <h2 className="text-xl font-black text-slate-900 mb-2">Total Budget</h2>
-              <form onSubmit={saveBudget} className="mt-6">
-                 <div className="relative mb-6">
-                    <IndianRupee size={24} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"/>
-                    <input type="number" autoFocus placeholder="0" className="w-full pl-10 pr-4 py-4 bg-slate-50 rounded-xl border-2 border-slate-100 focus:border-black font-black text-2xl text-slate-900 outline-none text-center" value={tempBudgetInput} onChange={e => setTempBudgetInput(e.target.value)} />
-                 </div>
-                 <div className="flex gap-3">
-                    <button type="button" onClick={() => setIsBudgetModalOpen(false)} className="flex-1 py-3 bg-white border-2 border-slate-100 text-slate-500 rounded-xl font-bold text-sm">Cancel</button>
-                    <button type="submit" className="flex-1 py-3 bg-black text-white rounded-xl font-bold text-sm shadow-lg">Save</button>
-                 </div>
-              </form>
-           </div>
-        </div>
-      )}
-
+          <button 
+            type="submit" 
+            disabled={isLoggingIn}
+            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-3.5 rounded-xl font-bold shadow-lg shadow-indigo-200 transition-all flex justify-center items-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed mt-4"
+          >
+            {isLoggingIn ? 'Signing In...' : <><Lock size={18} /> Sign In</>}
+          </button>
+        </form>
+      </div>
     </div>
   );
-}
+};
 
-// --- SMART LIST ITEM COMPONENT ---
-function SmartListItem({ item, user, appId, onDelete }: { item: Item, user: User | null, appId: string, onDelete: () => void }) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [isEditing, setIsEditing] = useState(false);
+// --- Main Application Component ---
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState('dashboard'); 
   
-  // Inputs
-  const [newCName, setNewCName] = useState('');
-  const [newCPrice, setNewCPrice] = useState('');
-  const [newCLink, setNewCLink] = useState('');
-  const [purchasedAmt, setPurchasedAmt] = useState(item.purchasedPrice?.toString() || '');
-  const [editName, setEditName] = useState(item.name);
+  // Settings / Budget State
+  const [budget, setBudget] = useState(0);
+  const [isEditingBudget, setIsEditingBudget] = useState(false);
+  const [tempBudget, setTempBudget] = useState(0);
 
-  const priInfo = PRIORITIES[item.priority];
-  const isPurchased = item.status === 'purchased';
-  const hasCandidates = item.candidates.length > 0;
-  const selectedCandidate = item.candidates.find(c => c.selected);
-
-  // DB Ops (Condensed)
-  const updateDB = async (data: any) => { if(user) await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'moving_items', item.id), data); };
+  // Form / Modal State
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingItem, setEditingItem] = useState(null);
   
-  const addCand = async (e: React.FormEvent) => {
-    e.preventDefault(); if(!newCName) return;
-    const nc: Candidate = { id: crypto.randomUUID(), name: newCName, price: Number(newCPrice)||0, link: newCLink, selected: false };
-    const uc = [...item.candidates, nc];
-    let updates: any = { candidates: uc };
-    if(uc.length===1) { uc[0].selected=true; updates.selectedPrice=nc.price; updates.status='decided'; }
-    await updateDB(updates);
-    setNewCName(''); setNewCPrice(''); setNewCLink('');
+  // Drag and Drop State
+  const [draggedItemId, setDraggedItemId] = useState(null);
+
+  // Simplified Form Data
+  const [formData, setFormData] = useState({
+    name: '',
+    price: '', 
+    category: CATEGORIES[0],
+    room: ROOMS[0],
+    priority: 'Medium',
+    status: 'Planned',
+    notes: '',
+    url: ''
+  });
+
+  // Filters & Search
+  const [filterRoom, setFilterRoom] = useState('All');
+  const [filterStatus, setFilterStatus] = useState('All');
+  const [searchTerm, setSearchTerm] = useState(''); 
+
+  // --- Authentication & Data Fetching ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        }
+        // Removed signInAnonymously fallback to require login
+      } catch (error) {
+        console.error("Auth failed:", error);
+      }
+    };
+    initAuth();
+
+    const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setLoading(false); // Stop loading once auth state is determined
+    });
+    return () => unsubscribeAuth();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    // Listen to Items
+    const itemsCollection = collection(db, 'artifacts', appId, 'users', user.uid, 'items');
+    const q = query(itemsCollection);
+    
+    const unsubscribeItems = onSnapshot(q, (snapshot) => {
+      const itemsData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setItems(itemsData);
+    }, (error) => {
+      console.error("Error fetching items:", error);
+    });
+
+    // Listen to Settings
+    const settingsDocRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'general');
+    const unsubscribeSettings = onSnapshot(settingsDocRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setBudget(data.budget || 0);
+        setTempBudget(data.budget || 0);
+      } else {
+        setDoc(settingsDocRef, { budget: 0 });
+      }
+    });
+
+    return () => {
+      unsubscribeItems();
+      unsubscribeSettings();
+    };
+  }, [user]);
+
+  // --- Auth Handlers ---
+  const handleLogin = async (email, password) => {
+    await signInWithEmailAndPassword(auth, email, password);
   };
 
-  const toggleSelect = async (cid: string) => {
-    const uc = item.candidates.map(c => ({...c, selected: c.id===cid ? !c.selected : false})); // Toggle logic
-    const sc = uc.find(c=>c.selected);
-    await updateDB({ candidates: uc, selectedPrice: sc?.price||0, status: sc ? 'decided' : 'researching' });
+  const handleLogout = async () => {
+    await signOut(auth);
   };
 
-  const markBuy = async () => { await updateDB({ status: 'purchased', purchasedPrice: Number(purchasedAmt)||item.selectedPrice }); };
-  const deleteCand = async (cid: string) => {
-     const uc = item.candidates.filter(c => c.id !== cid);
-     const wasSel = item.candidates.find(c=>c.id===cid)?.selected;
-     await updateDB({ candidates: uc, ...(wasSel ? {selectedPrice: 0, status: 'researching'} : {}) });
+  // --- Actions ---
+
+  const handleSaveItem = async (e) => {
+    e.preventDefault();
+    if (!user) return;
+
+    const payload = {
+      ...formData,
+      price: parseFloat(formData.price) || 0,
+      updatedAt: serverTimestamp()
+    };
+
+    try {
+      if (editingItem) {
+        await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'items', editingItem.id), payload);
+      } else {
+        await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'items'), {
+          ...payload,
+          createdAt: serverTimestamp()
+        });
+      }
+      closeModal();
+    } catch (error) {
+      console.error("Error saving item:", error);
+    }
   };
+
+  const handleUpdateStatus = async (itemId, newStatus) => {
+    if (!user || !itemId || !newStatus) return;
+    try {
+        await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'items', itemId), {
+            status: newStatus,
+            updatedAt: serverTimestamp()
+        });
+    } catch (error) {
+        console.error("Error updating status:", error);
+    }
+  };
+
+  const handleDeleteItem = async (itemId) => {
+    if (!user || !window.confirm("Are you sure you want to delete this item? This action cannot be undone.")) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'items', itemId));
+    } catch (error) {
+      console.error("Error deleting item:", error);
+    }
+  };
+
+  const handleUpdateBudget = async () => {
+    if (!user) return;
+    try {
+      const settingsDocRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'general');
+      await setDoc(settingsDocRef, { budget: parseFloat(tempBudget) }, { merge: true });
+      setIsEditingBudget(false);
+    } catch (error) {
+      console.error("Error updating budget:", error);
+    }
+  };
+
+  const openAddModal = () => {
+    setEditingItem(null);
+    setFormData({
+      name: '',
+      price: '',
+      category: CATEGORIES[0],
+      room: ROOMS[0],
+      priority: 'Medium',
+      status: 'Planned',
+      notes: '',
+      url: ''
+    });
+    setIsModalOpen(true);
+  };
+
+  const openEditModal = (item) => {
+    setEditingItem(item);
+    setFormData({
+      name: item.name,
+      price: item.price || '',
+      category: item.category,
+      room: item.room,
+      priority: item.priority,
+      status: item.status,
+      notes: item.notes || '',
+      url: item.url || ''
+    });
+    setIsModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setIsModalOpen(false);
+    setEditingItem(null);
+  };
+
+  // --- Drag and Drop Handlers ---
+  const onDragStart = (e, itemId) => {
+    setDraggedItemId(itemId);
+    e.dataTransfer.setData("text/plain", itemId);
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const onDragOver = (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
+
+  const onDrop = async (e, newStatus) => {
+    e.preventDefault();
+    const itemId = e.dataTransfer.getData("text/plain");
+    if (itemId) {
+        await handleUpdateStatus(itemId, newStatus);
+        setDraggedItemId(null);
+    }
+  };
+
+  // --- Export Functions ---
+  const handleExportCSV = () => {
+    const headers = ["Name", "Room", "Category", "Price", "Status", "Priority", "Notes", "Link"];
+    const rows = filteredItems.map(item => [
+      `"${item.name.replace(/"/g, '""')}"`, 
+      item.room,
+      item.category,
+      item.price,
+      item.status,
+      item.priority,
+      `"${(item.notes || '').replace(/"/g, '""')}"`,
+      item.url
+    ]);
+
+    const csvContent = "data:text/csv;charset=utf-8," 
+      + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", "moving_planner_export.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handlePrint = () => {
+    window.print();
+  };
+
+  // --- Metrics ---
+  const metrics = useMemo(() => {
+    const activeItems = items.filter(i => i.status !== 'Dropped');
+    const boughtItems = items.filter(i => i.status === 'Bought');
+    
+    const totalPlannedCost = activeItems.reduce((sum, item) => sum + (item.price || 0), 0);
+    const totalSpent = boughtItems.reduce((sum, item) => sum + (item.price || 0), 0);
+    const remainingBudget = budget - totalSpent;
+    
+    const itemsByRoom = activeItems.reduce((acc, item) => {
+      acc[item.room] = (acc[item.room] || 0) + 1;
+      return acc;
+    }, {});
+
+    const costByRoom = activeItems.reduce((acc, item) => {
+        acc[item.room] = (acc[item.room] || 0) + (item.price || 0);
+        return acc;
+    }, {});
+
+    const highPriorityCount = activeItems.filter(i => i.priority === 'High' && i.status !== 'Bought').length;
+
+    const roomData = Object.entries(costByRoom)
+        .map(([room, value]) => ({ 
+            label: room, 
+            value, 
+            color: '#6366f1' 
+        }))
+        .sort((a, b) => b.value - a.value);
+
+    return { totalPlannedCost, totalSpent, remainingBudget, itemsByRoom, costByRoom, highPriorityCount, roomData };
+  }, [items, budget]);
+
+  const filteredItems = items.filter(item => {
+    if (filterRoom !== 'All' && item.room !== filterRoom) return false;
+    if (filterStatus !== 'All' && item.status !== filterStatus) return false;
+    if (searchTerm && !item.name.toLowerCase().includes(searchTerm.toLowerCase())) return false; 
+    return true;
+  }).sort((a, b) => {
+      const priorityOrder = { 'High': 3, 'Medium': 2, 'Low': 1 };
+      if (priorityOrder[b.priority] !== priorityOrder[a.priority]) {
+          return priorityOrder[b.priority] - priorityOrder[a.priority];
+      }
+      return 0; 
+  });
+
+  const groupedItems = useMemo(() => {
+    if (filterRoom !== 'All') {
+        return { [filterRoom]: filteredItems };
+    }
+    return filteredItems.reduce((groups, item) => {
+      const group = item.room || 'Other';
+      if (!groups[group]) groups[group] = [];
+      groups[group].push(item);
+      return groups;
+    }, {});
+  }, [filteredItems, filterRoom]);
+
+  const sortedGroups = Object.keys(groupedItems).sort();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+      </div>
+    );
+  }
+
+  // --- Render Login Page if not authenticated ---
+  if (!user) {
+    return <LoginPage onLogin={handleLogin} />;
+  }
 
   return (
-    <div className={`transition-all duration-200 ${isExpanded ? 'bg-slate-50' : 'bg-white'}`}>
-       
-       {/* 1. MAIN ROW (Always Visible) */}
-       <div 
-         className="p-4 flex items-center gap-4 cursor-pointer active:bg-slate-50 hover:bg-slate-50"
-         onClick={() => setIsExpanded(!isExpanded)}
-       >
-          {/* Checkbox / Status Indicator */}
-          <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${isPurchased ? 'bg-emerald-500 border-emerald-500 text-white' : 'border-slate-300'}`}>
-             {isPurchased && <Check size={14} strokeWidth={3} />}
+    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans pb-24 md:pb-8 print:bg-white print:pb-0">
+      
+      {/* --- Top Navigation --- */}
+      <nav className="bg-white/80 backdrop-blur-md border-b border-slate-200 sticky top-0 z-40 transition-all print:hidden">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex justify-between h-16">
+            <div className="flex items-center gap-3">
+              <div className="bg-gradient-to-tr from-indigo-600 to-violet-600 p-2.5 rounded-xl shadow-lg shadow-indigo-200">
+                <Home className="text-white h-5 w-5" />
+              </div>
+              <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-700 to-violet-700 tracking-tight">
+                MovePlanner
+              </h1>
+            </div>
+            
+            <div className="hidden md:flex items-center space-x-2">
+              <button 
+                onClick={() => setView('dashboard')}
+                className={`px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200 ${view === 'dashboard' ? 'bg-indigo-50 text-indigo-700 shadow-sm ring-1 ring-indigo-200' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'}`}
+              >
+                <div className="flex items-center gap-2"><LayoutDashboard size={18}/> Dashboard</div>
+              </button>
+              <button 
+                onClick={() => setView('list')}
+                className={`px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200 ${view === 'list' ? 'bg-indigo-50 text-indigo-700 shadow-sm ring-1 ring-indigo-200' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'}`}
+              >
+                 <div className="flex items-center gap-2"><List size={18}/> Items</div>
+              </button>
+              <button 
+                onClick={() => setView('kanban')}
+                className={`px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200 ${view === 'kanban' ? 'bg-indigo-50 text-indigo-700 shadow-sm ring-1 ring-indigo-200' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'}`}
+              >
+                 <div className="flex items-center gap-2"><Columns size={18}/> Board</div>
+              </button>
+              
+              <div className="h-6 w-px bg-slate-200 mx-1"></div>
+
+              <button 
+                onClick={handleLogout}
+                className="px-3 py-2 text-rose-600 hover:bg-rose-50 rounded-xl transition-colors"
+                title="Log Out"
+              >
+                <LogOut size={18} />
+              </button>
+            </div>
           </div>
+        </div>
+      </nav>
 
-          {/* Text Content */}
-          <div className="flex-1 min-w-0">
-             <div className="flex items-center gap-2">
-                <h4 className={`font-bold text-base truncate ${isPurchased ? 'text-slate-400 line-through' : 'text-slate-900'}`}>{item.name}</h4>
-                {item.priority === 'must_have' && <div className="w-2 h-2 rounded-full bg-red-500"></div>}
-             </div>
-             <div className="text-xs text-slate-500 font-medium truncate">
-                {isPurchased 
-                   ? `Purchased` 
-                   : (selectedCandidate ? `Selected: ${selectedCandidate.name}` : `${item.candidates.length} options`)}
-             </div>
-          </div>
+      {/* --- Print Header (Visible only when printing) --- */}
+      <div className="hidden print:block p-8 border-b border-gray-200 mb-4">
+          <h1 className="text-3xl font-bold text-gray-900">Moving Plan</h1>
+          <p className="text-gray-500">Total Planned: {formatCurrency(metrics.totalPlannedCost)} | Spent: {formatCurrency(metrics.totalSpent)}</p>
+      </div>
 
-          {/* Price */}
-          <div className="text-right">
-             <div className={`font-bold text-sm ${isPurchased ? 'text-emerald-600' : 'text-slate-900'}`}>
-                {item.selectedPrice > 0 ? formatINR(isPurchased ? item.purchasedPrice||0 : item.selectedPrice) : '-'}
-             </div>
-          </div>
-       </div>
+      <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-6 print:p-0">
+        
+        {/* --- Dashboard View --- */}
+        {view === 'dashboard' && (
+          <div className="space-y-6 animate-in fade-in duration-500 print:hidden">
+            
+            {/* Budget Card */}
+            <div className="bg-gradient-to-br from-indigo-900 via-violet-900 to-slate-900 rounded-3xl shadow-xl shadow-indigo-200/50 p-6 sm:p-8 text-white relative overflow-hidden">
+              <div className="absolute top-0 right-0 -mr-16 -mt-16 w-64 h-64 rounded-full bg-white/5 blur-3xl"></div>
+              <div className="absolute bottom-0 left-0 -ml-16 -mb-16 w-48 h-48 rounded-full bg-indigo-500/20 blur-2xl"></div>
 
-       {/* 2. EXPANDED DETAIL VIEW */}
-       {isExpanded && (
-          <div className="px-4 pb-4 pl-14">
-             {/* Candidates List */}
-             <div className="space-y-2 mb-4">
-                {item.candidates.map(cand => (
-                   <div key={cand.id} className="flex items-center justify-between p-3 bg-white rounded-xl border border-slate-200 shadow-sm">
-                      <div className="flex items-center gap-3 overflow-hidden" onClick={() => !isPurchased && toggleSelect(cand.id)}>
-                         <div className={`w-4 h-4 rounded-full border flex items-center justify-center ${cand.selected ? 'bg-black border-black text-white' : 'border-slate-300'}`}>
-                            {cand.selected && <div className="w-2 h-2 bg-white rounded-full"></div>}
-                         </div>
-                         <div className="truncate">
-                            <p className="text-sm font-bold text-slate-800">{cand.name}</p>
-                            <p className="text-xs text-slate-500 font-bold">{formatINR(cand.price)}</p>
-                         </div>
-                      </div>
-                      <div className="flex gap-2">
-                         {cand.link && <a href={cand.link} target="_blank" className="p-1.5 text-indigo-600 bg-indigo-50 rounded-lg"><LinkIcon size={14}/></a>}
-                         {!isPurchased && <button onClick={() => deleteCand(cand.id)} className="p-1.5 text-red-500 bg-red-50 rounded-lg"><Trash2 size={14}/></button>}
-                      </div>
-                   </div>
-                ))}
-             </div>
+              <div className="relative z-10">
+                <div className="flex justify-between items-start mb-6">
+                  <div>
+                      <h2 className="text-indigo-100 font-medium text-sm uppercase tracking-wider mb-1">Total Budget</h2>
+                      {!isEditingBudget ? (
+                        <div onClick={() => setIsEditingBudget(true)} className="flex items-end gap-2 cursor-pointer group">
+                            <span className="text-4xl sm:text-5xl font-bold tracking-tight">{formatCurrency(budget)}</span>
+                            <Edit2 size={16} className="mb-2 text-indigo-300 opacity-0 group-hover:opacity-100 transition-opacity"/>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                            <input 
+                                type="number" 
+                                autoFocus
+                                value={tempBudget} 
+                                onChange={(e) => setTempBudget(e.target.value)}
+                                className="text-4xl font-bold w-48 bg-transparent border-b-2 border-indigo-400 focus:outline-none text-white placeholder-white/30"
+                            />
+                            <button onClick={handleUpdateBudget} className="bg-white text-indigo-900 p-2 rounded-full hover:bg-indigo-50"><CheckCircle2 size={20}/></button>
+                        </div>
+                      )}
+                  </div>
+                  <div className="bg-white/10 backdrop-blur-md p-3 rounded-2xl border border-white/10">
+                      <Wallet className="text-indigo-200" size={24} />
+                  </div>
+                </div>
 
-             {/* Add Candidate Input */}
-             {!isPurchased && (
-                <form onSubmit={addCand} className="flex gap-2 mb-4">
-                   <input className="flex-1 px-3 py-2 text-sm font-medium bg-white border border-slate-200 rounded-xl outline-none focus:border-black" placeholder="Add Model..." value={newCName} onChange={e=>setNewCName(e.target.value)} />
-                   <input className="w-20 px-3 py-2 text-sm font-medium bg-white border border-slate-200 rounded-xl outline-none focus:border-black" type="number" placeholder="₹" value={newCPrice} onChange={e=>setNewCPrice(e.target.value)} />
-                   <button disabled={!newCName} className="p-2 bg-black text-white rounded-xl disabled:opacity-50"><Plus size={18}/></button>
-                </form>
-             )}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-8">
+                  <div>
+                    <div className="flex justify-between text-indigo-200 text-sm mb-2">
+                      <span>Spent</span>
+                      <span className="text-white font-semibold">{formatCurrency(metrics.totalSpent)}</span>
+                    </div>
+                    <div className="w-full bg-black/20 rounded-full h-3 backdrop-blur-sm overflow-hidden">
+                      <div 
+                          className={`h-full rounded-full transition-all duration-1000 ease-out ${metrics.totalSpent > budget ? 'bg-rose-400' : 'bg-emerald-400'}`} 
+                          style={{ width: `${Math.min((metrics.totalSpent / (budget || 1)) * 100, 100)}%` }}
+                      ></div>
+                    </div>
+                  </div>
 
-             {/* Action Buttons */}
-             <div className="flex justify-between items-center pt-2 border-t border-slate-200">
-                <button onClick={onDelete} className="text-xs font-bold text-red-500 hover:underline">Delete Item</button>
-                {!isPurchased && item.status === 'decided' && (
-                   <div className="flex gap-2 items-center">
-                      <input type="number" className="w-20 px-2 py-1 text-xs border border-slate-200 rounded-lg" placeholder="Final ₹" value={purchasedAmt} onChange={e=>setPurchasedAmt(e.target.value)} />
-                      <button onClick={markBuy} className="px-3 py-1.5 bg-emerald-500 text-white text-xs font-bold rounded-lg shadow-sm">Mark Purchased</button>
-                   </div>
+                  <div>
+                    <div className="flex justify-between text-indigo-200 text-sm mb-2">
+                      <span>Planned Total</span>
+                      <span className="text-white font-semibold">{formatCurrency(metrics.totalPlannedCost)}</span>
+                    </div>
+                    <div className="w-full bg-black/20 rounded-full h-3 backdrop-blur-sm overflow-hidden">
+                      <div 
+                          className="bg-indigo-400 h-full rounded-full transition-all duration-1000 ease-out" 
+                          style={{ width: `${Math.min((metrics.totalPlannedCost / (budget || 1)) * 100, 100)}%` }}
+                      ></div>
+                    </div>
+                  </div>
+                </div>
+                
+                {metrics.totalPlannedCost > budget && (
+                    <div className="mt-6 flex items-start gap-3 bg-rose-500/20 backdrop-blur-md border border-rose-500/30 p-4 rounded-xl text-rose-100 text-sm">
+                        <AlertCircle size={18} className="mt-0.5 shrink-0" />
+                        <span>Warning: Planned items exceed budget by <strong>{formatCurrency(metrics.totalPlannedCost - budget)}</strong>.</span>
+                    </div>
                 )}
-             </div>
+              </div>
+            </div>
+
+            {/* Charts - Cost by Room */}
+            <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
+                   <div className="flex items-center gap-2 mb-4">
+                       <BarChart3 className="text-indigo-500" size={20} />
+                       <h3 className="text-lg font-bold text-slate-800">Cost by Room</h3>
+                   </div>
+                   <SimpleBarChart data={metrics.roomData} />
+            </div>
+
+            {/* Stats Grid */}
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+              <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-between h-32 md:h-auto relative overflow-hidden group">
+                <div className="absolute right-0 top-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity transform group-hover:scale-110 duration-500">
+                    <ShoppingBag size={80} className="text-indigo-600" />
+                </div>
+                <div className="flex items-center gap-2 mb-2">
+                    <div className="bg-indigo-50 p-2 rounded-xl text-indigo-600"><ShoppingBag size={18}/></div>
+                    <h3 className="text-xs font-bold uppercase text-slate-400 tracking-wider">To Buy</h3>
+                </div>
+                <div>
+                    <p className="text-2xl md:text-3xl font-bold text-slate-800">{metrics.itemsByRoom ? Object.values(metrics.itemsByRoom).reduce((a,b)=>a+b,0) : 0}</p>
+                    <p className="text-[10px] text-slate-400">Total active items</p>
+                </div>
+              </div>
+
+              <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-between h-32 md:h-auto relative overflow-hidden group">
+                 <div className="absolute right-0 top-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity transform group-hover:scale-110 duration-500">
+                    <AlertCircle size={80} className="text-rose-600" />
+                </div>
+                <div className="flex items-center gap-2 mb-2">
+                    <div className="bg-rose-50 p-2 rounded-xl text-rose-600"><AlertCircle size={18}/></div>
+                    <h3 className="text-xs font-bold uppercase text-slate-400 tracking-wider">Priority</h3>
+                </div>
+                 <div>
+                    <p className="text-2xl md:text-3xl font-bold text-slate-800">{metrics.highPriorityCount}</p>
+                    <p className="text-[10px] text-slate-400">High priority pending</p>
+                </div>
+              </div>
+
+              <div className="col-span-2 md:col-span-1 bg-white p-5 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-between h-32 md:h-auto relative overflow-hidden group">
+                 <div className="absolute right-0 top-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity transform group-hover:scale-110 duration-500">
+                    <IndianRupee size={80} className="text-emerald-600" />
+                </div>
+                <div className="flex items-center gap-2 mb-2">
+                    <div className="bg-emerald-50 p-2 rounded-xl text-emerald-600"><IndianRupee size={18}/></div>
+                    <h3 className="text-xs font-bold uppercase text-slate-400 tracking-wider">Remaining</h3>
+                </div>
+                 <div>
+                    <p className={`text-2xl md:text-3xl font-bold ${metrics.remainingBudget < 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                        {formatCurrency(metrics.remainingBudget)}
+                    </p>
+                    <p className="text-[10px] text-slate-400">Available to spend</p>
+                </div>
+              </div>
+            </div>
           </div>
-       )}
+        )}
+
+        {/* --- List View --- */}
+        {view === 'list' && (
+          <div className="space-y-6 animate-in fade-in duration-500">
+            
+            {/* Search and Filters */}
+            <div className="space-y-3 print:hidden">
+               <div className="relative">
+                   <input 
+                      type="text" 
+                      placeholder="Search items..." 
+                      className="w-full pl-10 pr-4 py-3 rounded-2xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:outline-none shadow-sm"
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                   />
+                   <Search className="absolute left-3.5 top-3.5 text-slate-400" size={18} />
+                   {searchTerm && (
+                       <button onClick={() => setSearchTerm('')} className="absolute right-3.5 top-3.5 text-slate-400 hover:text-slate-600">
+                           <X size={18} />
+                       </button>
+                   )}
+               </div>
+
+               <div className="flex flex-col sm:flex-row gap-3 justify-between">
+                   <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+                        <div className="relative min-w-[140px]">
+                            <select 
+                                className="w-full appearance-none pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm"
+                                value={filterRoom}
+                                onChange={(e) => setFilterRoom(e.target.value)}
+                            >
+                                <option value="All">All Rooms</option>
+                                {ROOMS.map(r => <option key={r} value={r}>{r}</option>)}
+                            </select>
+                            <Filter className="absolute left-3.5 top-3 text-indigo-500" size={14} />
+                        </div>
+                        
+                        <div className="relative min-w-[140px]">
+                            <select 
+                                className="w-full appearance-none pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm"
+                                value={filterStatus}
+                                onChange={(e) => setFilterStatus(e.target.value)}
+                            >
+                                <option value="All">All Statuses</option>
+                                {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                            <CheckCircle2 className="absolute left-3.5 top-3 text-indigo-500" size={14} />
+                        </div>
+                    </div>
+
+                    <div className="flex gap-2">
+                        <button 
+                            onClick={handleExportCSV}
+                            className="bg-white border border-slate-200 text-slate-600 px-3 py-2.5 rounded-xl text-xs font-bold hover:bg-slate-50 transition-colors flex items-center gap-2 shadow-sm whitespace-nowrap"
+                        >
+                            <FileSpreadsheet size={16}/> Export Excel/CSV
+                        </button>
+                        <button 
+                            onClick={handlePrint}
+                            className="bg-white border border-slate-200 text-slate-600 px-3 py-2.5 rounded-xl text-xs font-bold hover:bg-slate-50 transition-colors flex items-center gap-2 shadow-sm whitespace-nowrap"
+                        >
+                            <Printer size={16}/> Save as PDF
+                        </button>
+                    </div>
+               </div>
+            </div>
+
+            {/* Desktop Add Button */}
+            <div className="hidden md:flex justify-end print:hidden">
+                 <button 
+                    onClick={openAddModal}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 shadow-lg shadow-indigo-200 transition-all hover:scale-105"
+                  >
+                    <Plus size={18} /> Add New Item
+                  </button>
+            </div>
+
+            {/* Grouped Items List */}
+            <div className="space-y-8 print:space-y-6">
+              {sortedGroups.map(roomName => (
+                  <div key={roomName} className="animate-in fade-in duration-300 break-inside-avoid">
+                      <div className="flex items-center gap-2 mb-3 px-1">
+                          <h2 className="text-lg font-bold text-slate-800 bg-slate-100 px-3 py-1 rounded-lg inline-block print:bg-transparent print:p-0">
+                              {roomName}
+                          </h2>
+                          <span className="text-xs font-semibold text-slate-400 bg-white border border-slate-200 px-2 py-0.5 rounded-full print:hidden">
+                              {groupedItems[roomName].length}
+                          </span>
+                      </div>
+                      <div className="grid grid-cols-1 gap-4 print:block print:gap-0">
+                        {groupedItems[roomName].map(item => (
+                            <div key={item.id} className="bg-white rounded-3xl shadow-sm border border-slate-100 p-5 hover:shadow-lg hover:shadow-indigo-50 transition-all duration-300 group print:shadow-none print:rounded-none print:border-b print:border-slate-200 print:mb-2 print:p-2">
+                                <div className="flex flex-col sm:flex-row justify-between gap-4 print:flex-row">
+                                    <div className="flex-1">
+                                        <div className="flex items-start justify-between sm:justify-start gap-2 mb-1">
+                                            <h3 className={`font-bold text-lg leading-tight ${item.status === 'Dropped' ? 'line-through text-slate-400' : 'text-slate-800'}`}>
+                                                {item.name}
+                                            </h3>
+                                            <div className="flex sm:hidden items-center gap-2 print:hidden">
+                                                <StatusBadge status={item.status} />
+                                            </div>
+                                        </div>
+                                        
+                                        <div className="hidden sm:flex items-center gap-2 mb-3 print:flex print:mb-1">
+                                            <StatusBadge status={item.status} />
+                                            <PriorityBadge priority={item.priority} />
+                                        </div>
+
+                                        <div className="flex flex-wrap gap-2 mb-3 print:mb-1">
+                                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 text-xs font-medium print:bg-transparent print:p-0">
+                                                <List size={12} /> {item.category}
+                                            </span>
+                                        </div>
+
+                                        {item.notes && (
+                                            <p className="text-sm text-slate-500 bg-slate-50 p-3 rounded-xl mb-3 border border-slate-100 leading-relaxed print:bg-transparent print:p-0 print:border-0 print:italic">
+                                                {item.notes}
+                                            </p>
+                                        )}
+
+                                        {item.url && (
+                                            <a href={item.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-800 hover:underline print:hidden">
+                                                <ExternalLink size={14} /> View Product Link
+                                            </a>
+                                        )}
+                                    </div>
+
+                                    <div className="flex flex-row sm:flex-col justify-between items-center sm:items-end gap-3 sm:gap-1 mt-2 sm:mt-0 pt-3 sm:pt-0 border-t sm:border-0 border-slate-100 print:border-0">
+                                        <div className="text-left sm:text-right print:text-right">
+                                            <span className="block text-xl sm:text-2xl font-bold text-slate-800 tracking-tight">{formatCurrency(item.price)}</span>
+                                        </div>
+                                        
+                                        <div className="flex items-center gap-1 print:hidden">
+                                            <button 
+                                                onClick={() => openEditModal(item)}
+                                                className="p-2.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"
+                                            >
+                                                <Edit2 size={18} />
+                                            </button>
+                                            <button 
+                                                onClick={() => handleDeleteItem(item.id)}
+                                                className="p-2.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-colors"
+                                            >
+                                                <Trash2 size={18} />
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                      </div>
+                  </div>
+              ))}
+
+              {filteredItems.length === 0 && (
+                  <div className="flex flex-col items-center justify-center py-16 bg-white rounded-3xl border-2 border-dashed border-slate-200 text-center">
+                      <div className="bg-slate-50 p-4 rounded-full mb-4">
+                        <ShoppingBag size={32} className="text-slate-300" />
+                      </div>
+                      <p className="text-slate-500 font-medium">No items found matching criteria.</p>
+                      <button onClick={openAddModal} className="mt-3 text-indigo-600 font-semibold hover:underline">Add your first item</button>
+                  </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* --- Kanban Board View --- */}
+        {view === 'kanban' && (
+            <div className="animate-in fade-in duration-500 h-[calc(100vh-140px)] overflow-x-auto overflow-y-hidden pb-4">
+                <div className="flex gap-4 h-full min-w-full w-max px-2">
+                    {STATUSES.map(status => {
+                        // Filter items for this column
+                        const columnItems = filteredItems.filter(i => i.status === status);
+                        const isColumnOver = false; // Could add drag-over visual state here if needed
+
+                        return (
+                            <div 
+                                key={status}
+                                onDragOver={onDragOver}
+                                onDrop={(e) => onDrop(e, status)}
+                                className="w-80 flex-shrink-0 flex flex-col bg-slate-100 rounded-2xl border border-slate-200 h-full max-h-full"
+                            >
+                                {/* Column Header */}
+                                <div className={`p-4 border-b border-slate-200 rounded-t-2xl bg-white sticky top-0 z-10 flex justify-between items-center
+                                    ${status === 'Planned' ? 'border-t-4 border-t-slate-400' : ''}
+                                    ${status === 'Shortlisted' ? 'border-t-4 border-t-purple-400' : ''}
+                                    ${status === 'Bought' ? 'border-t-4 border-t-emerald-400' : ''}
+                                    ${status === 'Dropped' ? 'border-t-4 border-t-rose-400' : ''}
+                                `}>
+                                    <h3 className="font-bold text-slate-700">{status}</h3>
+                                    <span className="text-xs font-bold bg-slate-100 text-slate-500 px-2 py-1 rounded-full">
+                                        {columnItems.length}
+                                    </span>
+                                </div>
+
+                                {/* Column Content (Scrollable) */}
+                                <div className="p-3 overflow-y-auto flex-1 space-y-3 custom-scrollbar">
+                                    {columnItems.map(item => (
+                                        <div 
+                                            key={item.id}
+                                            draggable
+                                            onDragStart={(e) => onDragStart(e, item.id)}
+                                            className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 cursor-grab active:cursor-grabbing hover:shadow-md transition-all group relative"
+                                        >
+                                            <div className="flex justify-between items-start mb-2">
+                                                <h4 className={`font-bold text-sm text-slate-800 ${item.status === 'Dropped' ? 'line-through text-slate-400' : ''}`}>
+                                                    {item.name}
+                                                </h4>
+                                                <PriorityBadge priority={item.priority} />
+                                            </div>
+                                            
+                                            <div className="text-lg font-bold text-slate-900 mb-2">
+                                                {formatCurrency(item.price)}
+                                            </div>
+
+                                            <div className="flex flex-wrap gap-2 mb-3">
+                                                <span className="text-[10px] bg-slate-50 text-slate-500 px-2 py-1 rounded border border-slate-100">
+                                                    {item.room}
+                                                </span>
+                                                <span className="text-[10px] bg-slate-50 text-slate-500 px-2 py-1 rounded border border-slate-100">
+                                                    {item.category}
+                                                </span>
+                                            </div>
+
+                                            {/* Mobile Quick Move Actions (Visible on small screens or hover) */}
+                                            <div className="pt-3 border-t border-slate-50 flex justify-between items-center">
+                                                <div className="flex gap-2">
+                                                    <button onClick={() => openEditModal(item)} className="text-slate-400 hover:text-indigo-600">
+                                                        <Edit2 size={14}/>
+                                                    </button>
+                                                    <button onClick={() => handleDeleteItem(item.id)} className="text-slate-400 hover:text-rose-600">
+                                                        <Trash2 size={14}/>
+                                                    </button>
+                                                </div>
+                                                
+                                                {/* Mobile dropdown to move items without drag */}
+                                                <div className="relative group/move">
+                                                    <button className="text-slate-400 hover:text-slate-600">
+                                                        <GripHorizontal size={16} />
+                                                    </button>
+                                                    <select 
+                                                        className="absolute inset-0 opacity-0 cursor-pointer"
+                                                        value={item.status}
+                                                        onChange={(e) => handleUpdateStatus(item.id, e.target.value)}
+                                                    >
+                                                        {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                                                    </select>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {columnItems.length === 0 && (
+                                        <div className="h-24 border-2 border-dashed border-slate-200 rounded-xl flex items-center justify-center text-slate-400 text-xs">
+                                            Drop items here
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+        )}
+      </main>
+      
+      {/* --- Mobile Bottom Nav --- */}
+      <div className="md:hidden fixed bottom-6 left-6 right-6 h-16 bg-white/90 backdrop-blur-xl border border-white/20 shadow-2xl shadow-indigo-900/10 rounded-full flex justify-between items-center px-8 z-40 print:hidden">
+           <button 
+                onClick={() => setView('dashboard')} 
+                className={`flex flex-col items-center gap-1 transition-colors ${view === 'dashboard' ? 'text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
+            >
+                <LayoutDashboard size={22} strokeWidth={view === 'dashboard' ? 2.5 : 2} />
+                <span className="text-[10px] font-bold">Dash</span>
+           </button>
+           <button 
+              onClick={openAddModal} 
+              className="absolute left-1/2 -top-6 -translate-x-1/2 bg-gradient-to-tr from-indigo-600 to-violet-600 text-white p-4 rounded-full shadow-lg shadow-indigo-300 border-[6px] border-slate-50 active:scale-95 transition-transform"
+           >
+              <Plus size={28} />
+           </button>
+           <button 
+                onClick={() => setView('list')} 
+                className={`flex flex-col items-center gap-1 transition-colors ${view === 'list' ? 'text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
+            >
+                <List size={22} strokeWidth={view === 'list' ? 2.5 : 2} />
+                <span className="text-[10px] font-bold">Items</span>
+           </button>
+           <button 
+                onClick={() => setView('kanban')} 
+                className={`flex flex-col items-center gap-1 transition-colors ${view === 'kanban' ? 'text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
+            >
+                <Columns size={22} strokeWidth={view === 'kanban' ? 2.5 : 2} />
+                <span className="text-[10px] font-bold">Board</span>
+           </button>
+      </div>
+
+      {/* --- Add/Edit Modal --- */}
+      <Modal 
+        isOpen={isModalOpen} 
+        onClose={closeModal} 
+        title={editingItem ? "Edit Item" : "New Item"}
+      >
+        <form onSubmit={handleSaveItem} className="space-y-5">
+            <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 tracking-wider mb-2">Item Name</label>
+                <input 
+                required
+                type="text" 
+                className="w-full rounded-xl border-slate-200 border bg-slate-50 p-3 text-slate-800 font-medium focus:ring-2 focus:ring-indigo-500 focus:outline-none focus:bg-white transition-all"
+                placeholder="e.g., Living Room TV"
+                value={formData.name}
+                onChange={e => setFormData({...formData, name: e.target.value})}
+                />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+                <div>
+                    <label className="block text-xs font-bold uppercase text-slate-400 tracking-wider mb-2">Price (₹)</label>
+                    <input 
+                    type="number" 
+                    min="0"
+                    className="w-full rounded-xl border-slate-200 border bg-slate-50 p-3 text-slate-800 font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none focus:bg-white transition-all"
+                    placeholder="0"
+                    value={formData.price}
+                    onChange={e => setFormData({...formData, price: e.target.value})}
+                    />
+                </div>
+                <div>
+                    <label className="block text-xs font-bold uppercase text-slate-400 tracking-wider mb-2">Status</label>
+                    <select 
+                        className="w-full appearance-none rounded-xl border-slate-200 border bg-slate-50 p-3 text-slate-800 font-medium focus:ring-2 focus:ring-indigo-500 focus:outline-none focus:bg-white transition-all"
+                        value={formData.status}
+                        onChange={e => setFormData({...formData, status: e.target.value})}
+                    >
+                        {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+                <div>
+                    <label className="block text-xs font-bold uppercase text-slate-400 tracking-wider mb-2">Category</label>
+                    <select 
+                    className="w-full appearance-none rounded-xl border-slate-200 border bg-slate-50 p-3 text-slate-800 font-medium focus:ring-2 focus:ring-indigo-500 focus:outline-none focus:bg-white transition-all"
+                    value={formData.category}
+                    onChange={e => setFormData({...formData, category: e.target.value})}
+                    >
+                        {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                </div>
+                <div>
+                    <label className="block text-xs font-bold uppercase text-slate-400 tracking-wider mb-2">Room</label>
+                    <select 
+                    className="w-full appearance-none rounded-xl border-slate-200 border bg-slate-50 p-3 text-slate-800 font-medium focus:ring-2 focus:ring-indigo-500 focus:outline-none focus:bg-white transition-all"
+                    value={formData.room}
+                    onChange={e => setFormData({...formData, room: e.target.value})}
+                    >
+                        {ROOMS.map(r => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                </div>
+            </div>
+
+            <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 tracking-wider mb-3">Priority</label>
+                <div className="flex gap-2">
+                {PRIORITIES.map(p => (
+                    <label key={p} className={`flex-1 text-center cursor-pointer py-2.5 rounded-xl border-2 transition-all font-bold text-sm ${formData.priority === p ? 'border-indigo-600 bg-indigo-50 text-indigo-700' : 'border-slate-100 text-slate-400 hover:border-slate-300'}`}>
+                        <input 
+                            type="radio" 
+                            name="priority" 
+                            value={p} 
+                            checked={formData.priority === p}
+                            onChange={e => setFormData({...formData, priority: e.target.value})}
+                            className="hidden"
+                        />
+                        {p}
+                    </label>
+                ))}
+                </div>
+            </div>
+
+            <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 tracking-wider mb-2">Product Link</label>
+                <input 
+                type="url" 
+                className="w-full rounded-xl border-slate-200 border bg-slate-50 p-3 text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none focus:bg-white transition-all"
+                placeholder="https://..."
+                value={formData.url}
+                onChange={e => setFormData({...formData, url: e.target.value})}
+                />
+            </div>
+
+            <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 tracking-wider mb-2">Notes</label>
+                <textarea 
+                className="w-full rounded-xl border-slate-200 border bg-slate-50 p-3 text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none focus:bg-white transition-all min-h-[80px]"
+                placeholder="Dimensions, ideas, etc..."
+                value={formData.notes}
+                onChange={e => setFormData({...formData, notes: e.target.value})}
+                ></textarea>
+            </div>
+
+            <div className="pt-2 flex gap-3">
+                <button 
+                type="submit" 
+                className="flex-1 bg-indigo-600 text-white py-3.5 rounded-xl font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 hover:shadow-xl hover:-translate-y-0.5 transition-all flex justify-center items-center gap-2"
+                >
+                <Save size={18} /> Save Item
+                </button>
+                <button 
+                type="button" 
+                onClick={closeModal}
+                className="px-6 bg-white border border-slate-200 text-slate-600 py-3.5 rounded-xl font-bold hover:bg-slate-50 transition-colors"
+                >
+                Cancel
+                </button>
+            </div>
+        </form>
+      </Modal>
+
     </div>
   );
 }
